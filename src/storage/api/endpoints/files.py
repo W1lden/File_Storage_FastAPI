@@ -2,6 +2,8 @@ from io import BytesIO
 from typing import Optional
 import secrets
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status, File as FileUpload
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from storage.core.db import get_session
@@ -9,7 +11,7 @@ from storage.core.security import get_current_user
 from storage.core.constants import Role, Visibility, ROLE_ALLOWED_TYPES, ROLE_ALLOWED_VISIBILITY, ROLE_MAX_SIZE_MB, BYTES_IN_MB, OBJECT_KEY_RANDOM_BYTES, DOWNLOADS_INCREMENT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_FILE_TOO_LARGE, ERR_TYPE_NOT_ALLOWED, ERR_VISIBILITY_NOT_ALLOWED
 from storage.db.models.file import File, FileVisibility
 from storage.db.models.user import User
-from storage.services.s3 import get_client, ensure_bucket
+from storage.services.s3 import ensure_bucket, get_client
 from storage.services.tasks import extract_metadata_task
 from storage.core.config import settings
 
@@ -92,11 +94,28 @@ async def download_file(
     role = _role_from_user(current_user)
     if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
         raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+
     client = get_client()
-    url = client.presigned_get_object(settings.MINIO_BUCKET_NAME, f.object_key)
+    obj = client.get_object(settings.MINIO_BUCKET_NAME, f.object_key)
+
+    def _iter():
+        try:
+            for chunk in obj.stream(64 * 1024):
+                yield chunk
+        finally:
+            obj.close()
+            obj.release_conn()
+
     f.downloads_count += DOWNLOADS_INCREMENT
     await session.commit()
-    return {"download_url": url}
+
+    return StreamingResponse(
+        _iter(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{f.filename}"'},
+        background=BackgroundTask(lambda: None),
+    )
+
 
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_file(
