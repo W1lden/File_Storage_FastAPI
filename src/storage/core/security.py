@@ -1,28 +1,24 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from storage.core.config import settings
 from storage.core.db import get_session
 from storage.db.models.user import User
+from storage.core.constants import API_TOKEN_URL, ERR_INVALID_CREDENTIALS
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=API_TOKEN_URL)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
-
 
 async def authenticate_user(session: AsyncSession, email: str, password: str) -> Optional[User]:
     q = await session.execute(select(User).where(User.email == email))
@@ -35,16 +31,14 @@ async def authenticate_user(session: AsyncSession, email: str, password: str) ->
         return None
     return user
 
-
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
-
 async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSession = Depends(get_session)) -> User:
-    credentials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    credentials_exception = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ERR_INVALID_CREDENTIALS)
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         sub = payload.get("sub")
