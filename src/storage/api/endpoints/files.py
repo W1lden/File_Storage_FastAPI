@@ -1,20 +1,31 @@
+import secrets
 from io import BytesIO
 from typing import Optional
-import secrets
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status, File as FileUpload
+
+from fastapi import APIRouter, Depends
+from fastapi import File as FileUpload
+from fastapi import Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import selectinload
+from starlette.background import BackgroundTask
+
+from storage.core.config import settings
+from storage.core.constants import (BYTES_IN_MB, DOWNLOADS_INCREMENT,
+                                    ERR_FILE_TOO_LARGE, ERR_FORBIDDEN,
+                                    ERR_NOT_FOUND, ERR_TYPE_NOT_ALLOWED,
+                                    ERR_VISIBILITY_NOT_ALLOWED,
+                                    OBJECT_KEY_RANDOM_BYTES,
+                                    ROLE_ALLOWED_TYPES,
+                                    ROLE_ALLOWED_VISIBILITY, ROLE_MAX_SIZE_MB,
+                                    STREAM_CHUNK_SIZE, Role, Visibility)
 from storage.core.db import get_session
 from storage.core.security import get_current_user
-from storage.core.constants import Role, Visibility, ROLE_ALLOWED_TYPES, ROLE_ALLOWED_VISIBILITY, ROLE_MAX_SIZE_MB, BYTES_IN_MB, OBJECT_KEY_RANDOM_BYTES, DOWNLOADS_INCREMENT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_FILE_TOO_LARGE, ERR_TYPE_NOT_ALLOWED, ERR_VISIBILITY_NOT_ALLOWED, STREAM_CHUNK_SIZE
 from storage.db.models.file import File, FileVisibility
 from storage.db.models.user import User
 from storage.services.s3 import ensure_bucket, get_client
 from storage.services.tasks import extract_metadata_task
-from storage.core.config import settings
 
 router = APIRouter()
 
@@ -38,18 +49,28 @@ async def upload_file(
     Загрузка файла в хранилище с учётом роли и уровня видимости.
 
     Принимает multipart/form-data: файл и значение видимости.
-    Проверяет ограничения роли по типу и размеру, сохраняет в S3, создаёт запись в БД и запускает задачу извлечения метаданных.
+    Проверяет ограничения роли по типу и размеру, сохраняет в S3,
+    создаёт запись в БД и запускает задачу извлечения метаданных.
     """
     role = _role_from_user(current_user)
     if visibility not in ROLE_ALLOWED_VISIBILITY[role]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_VISIBILITY_NOT_ALLOWED)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERR_VISIBILITY_NOT_ALLOWED,
+        )
     if file.content_type not in ROLE_ALLOWED_TYPES[role]:
-        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=ERR_TYPE_NOT_ALLOWED)
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=ERR_TYPE_NOT_ALLOWED,
+        )
     max_bytes = ROLE_MAX_SIZE_MB[role] * BYTES_IN_MB
     chunk = await file.read()
     if len(chunk) > max_bytes:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=ERR_FILE_TOO_LARGE)
-    object_key = f"{current_user.id}/{secrets.token_urlsafe(OBJECT_KEY_RANDOM_BYTES)}_{file.filename}"
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=ERR_FILE_TOO_LARGE,
+        )
+    object_key = f"{current_user.id}/{secrets.token_urlsafe(OBJECT_KEY_RANDOM_BYTES)}_{file.filename}" # noqa
     ensure_bucket()
     client = get_client()
     data_stream = BytesIO(chunk)
@@ -72,7 +93,12 @@ async def upload_file(
     await session.commit()
     await session.refresh(db_file)
     extract_metadata_task.delay(object_key, file.content_type)
-    return {"id": db_file.id, "filename": db_file.filename, "visibility": db_file.visibility.value, "object_key": db_file.object_key}
+    return {
+        "id": db_file.id,
+        "filename": db_file.filename,
+        "visibility": db_file.visibility.value,
+        "object_key": db_file.object_key,
+    }
 
 
 @router.get("/{file_id}")
@@ -88,18 +114,38 @@ async def get_file_info(
     Применяются проверки доступа по видимости и ролям.
     """
     q = await session.execute(
-        select(File).options(selectinload(File.owner)).where(File.id == file_id)
+        select(File)
+        .options(selectinload(File.owner))
+        .where(File.id == file_id)
     )
     f = q.scalar_one_or_none()
     if not f:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND
+        )
     role = _role_from_user(current_user)
-    if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
+    if (
+        f.visibility == FileVisibility.PRIVATE
+        and f.owner_id != current_user.id
+        and role != Role.ADMIN
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+        )
     if f.visibility == FileVisibility.DEPARTMENT:
-        if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
-    return {"id": f.id, "filename": f.filename, "visibility": f.visibility.value, "metadata": f.metadata_, "downloads_count": f.downloads_count}
+        if role == Role.USER and (
+            not f.owner or f.owner.department_id != current_user.department_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+            )
+    return {
+        "id": f.id,
+        "filename": f.filename,
+        "visibility": f.visibility.value,
+        "metadata": f.metadata_,
+        "downloads_count": f.downloads_count,
+    }
 
 
 @router.get("/{file_id}/download")
@@ -111,20 +157,35 @@ async def download_file(
     """
     Скачивание файла по ID со стримингом и проверкой прав доступа.
 
-    Увеличивает счётчик скачиваний и возвращает поток ответа с корректными заголовками для загрузки.
+    Увеличивает счётчик скачиваний и возвращает поток ответа
+    с корректными заголовками для загрузки.
     """
     q = await session.execute(
-        select(File).options(selectinload(File.owner)).where(File.id == file_id)
+        select(File)
+        .options(selectinload(File.owner))
+        .where(File.id == file_id)
     )
     f = q.scalar_one_or_none()
     if not f:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND
+        )
     role = _role_from_user(current_user)
-    if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
+    if (
+        f.visibility == FileVisibility.PRIVATE
+        and f.owner_id != current_user.id
+        and role != Role.ADMIN
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+        )
     if f.visibility == FileVisibility.DEPARTMENT:
-        if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
+        if role == Role.USER and (
+            not f.owner or f.owner.department_id != current_user.department_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+            )
     client = get_client()
     obj = client.get_object(settings.MINIO_BUCKET_NAME, f.object_key)
 
@@ -141,7 +202,9 @@ async def download_file(
     return StreamingResponse(
         _iter(),
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{f.filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{f.filename}"'
+        },
         background=BackgroundTask(lambda: None),
     )
 
@@ -165,9 +228,18 @@ async def delete_file(
         return
     role = _role_from_user(current_user)
     if role == Role.USER and f.owner_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
-    if role == Role.MANAGER and getattr(f, "owner", None) and getattr(f.owner, "department_id", None) != current_user.department_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+        )
+    if (
+        role == Role.MANAGER
+        and getattr(f, "owner", None)
+        and getattr(f.owner, "department_id", None)
+        != current_user.department_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN
+        )
     client = get_client()
     client.remove_object(settings.MINIO_BUCKET_NAME, f.object_key)
     await session.delete(f)
@@ -188,7 +260,11 @@ async def list_files(
     Для MANAGER/ADMIN поддерживается фильтрация по department_id.
     """
     role = _role_from_user(current_user)
-    base = select(File).join(User, File.owner_id == User.id).options(selectinload(File.owner))
+    base = (
+        select(File)
+        .join(User, File.owner_id == User.id)
+        .options(selectinload(File.owner))
+    )
 
     if role == Role.ADMIN:
         q = base
@@ -197,15 +273,24 @@ async def list_files(
             or_(
                 File.visibility == FileVisibility.PUBLIC,
                 File.visibility == FileVisibility.DEPARTMENT,
-                and_(File.visibility == FileVisibility.PRIVATE, File.owner_id == current_user.id),
+                and_(
+                    File.visibility == FileVisibility.PRIVATE,
+                    File.owner_id == current_user.id,
+                ),
             )
         )
     else:
         q = base.where(
             or_(
                 File.visibility == FileVisibility.PUBLIC,
-                and_(File.visibility == FileVisibility.DEPARTMENT, User.department_id == current_user.department_id),
-                and_(File.visibility == FileVisibility.PRIVATE, File.owner_id == current_user.id),
+                and_(
+                    File.visibility == FileVisibility.DEPARTMENT,
+                    User.department_id == current_user.department_id,
+                ),
+                and_(
+                    File.visibility == FileVisibility.PRIVATE,
+                    File.owner_id == current_user.id,
+                ),
             )
         )
 
@@ -213,4 +298,7 @@ async def list_files(
         q = q.where(User.department_id == department_id)
 
     rows = (await session.execute(q)).scalars().all()
-    return [{"id": x.id, "filename": x.filename, "visibility": x.visibility.value} for x in rows]
+    return [
+        {"id": x.id, "filename": x.filename, "visibility": x.visibility.value}
+        for x in rows
+    ]

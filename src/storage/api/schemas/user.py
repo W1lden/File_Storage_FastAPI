@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr
+
 from storage.db.models.user import UserRole
 
 

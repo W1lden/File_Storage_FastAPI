@@ -1,4 +1,5 @@
 from minio import Minio
+
 from storage.core.config import settings
 
 _client_internal = Minio(
@@ -8,8 +9,10 @@ _client_internal = Minio(
     secure=False,
 )
 
+
 def get_client() -> Minio:
     return _client_internal
+
 
 def ensure_bucket() -> None:
     client = get_client()

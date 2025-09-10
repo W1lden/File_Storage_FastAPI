@@ -1,13 +1,15 @@
 from celery import Celery
+from minio.error import S3Error
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from storage.core.config import settings
+from storage.core.constants import (CELERY_TASK_EXTRACT_METADATA, DOC_TYPES,
+                                    MIME_PDF)
 from storage.core.db import async_session_maker
 from storage.db.models.file import File
-from storage.core.constants import CELERY_TASK_EXTRACT_METADATA, MIME_PDF, DOC_TYPES
-from storage.services.metadata import extract_pdf_meta, extract_docx_meta
+from storage.services.metadata import extract_docx_meta, extract_pdf_meta
 from storage.services.s3 import get_client
-from minio.error import S3Error
 
 celery_app = Celery(
     __name__,
@@ -44,7 +46,9 @@ def extract_metadata_task(object_key: str, content_type: str):
 
     async def _save():
         async with async_session_maker() as session:
-            q = await session.execute(select(File).where(File.object_key == object_key))
+            q = await session.execute(
+                select(File).where(File.object_key == object_key)
+            )
             file = q.scalar_one_or_none()
             if not file:
                 return
@@ -52,4 +56,5 @@ def extract_metadata_task(object_key: str, content_type: str):
             await session.commit()
 
     import asyncio
+
     asyncio.run(_save())
