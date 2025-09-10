@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./src/.env
+      - .env
     volumes:
       - ./src:/app
     depends_on:
@@ -52,7 +52,7 @@ services:
     container_name: file_storage_celery
     command: celery -A storage.services.tasks worker --loglevel=info
     env_file:
-      - ./src/.env
+      - .env
     volumes:
       - ./src:/app
     depends_on:
