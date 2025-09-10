@@ -65,10 +65,10 @@ File_Storage_FastAPI/
 │  │  │  └─ tasks.py
 │  │  ├─ __init__.py
 │  │  └─ main.py
-│  ├─ .env
 │  ├─ alembic.ini
 │  ├─ Dockerfile
 │  └─ requirements.txt
+├─ .env
 ├─ .gitignore
 ├─ docker-compose.yml
 └─ README.md
