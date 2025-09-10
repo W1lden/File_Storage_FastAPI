@@ -5,10 +5,11 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, status,
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
+from sqlalchemy.orm import selectinload
 from storage.core.db import get_session
 from storage.core.security import get_current_user
-from storage.core.constants import Role, Visibility, ROLE_ALLOWED_TYPES, ROLE_ALLOWED_VISIBILITY, ROLE_MAX_SIZE_MB, BYTES_IN_MB, OBJECT_KEY_RANDOM_BYTES, DOWNLOADS_INCREMENT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_FILE_TOO_LARGE, ERR_TYPE_NOT_ALLOWED, ERR_VISIBILITY_NOT_ALLOWED
+from storage.core.constants import Role, Visibility, ROLE_ALLOWED_TYPES, ROLE_ALLOWED_VISIBILITY, ROLE_MAX_SIZE_MB, BYTES_IN_MB, OBJECT_KEY_RANDOM_BYTES, DOWNLOADS_INCREMENT, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_FILE_TOO_LARGE, ERR_TYPE_NOT_ALLOWED, ERR_VISIBILITY_NOT_ALLOWED, STREAM_CHUNK_SIZE
 from storage.db.models.file import File, FileVisibility
 from storage.db.models.user import User
 from storage.services.s3 import ensure_bucket, get_client
@@ -70,15 +71,18 @@ async def get_file_info(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
-    q = await session.execute(select(File).where(File.id == file_id))
+    q = await session.execute(
+    select(File).options(selectinload(File.owner)).where(File.id == file_id)
+    )
     f = q.scalar_one_or_none()
     if not f:
         raise HTTPException(status_code=404, detail=ERR_NOT_FOUND)
     role = _role_from_user(current_user)
     if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
         raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
-    if f.visibility == FileVisibility.DEPARTMENT and role == Role.USER and current_user.department_id != getattr(f, "owner", None).department_id:
-        pass
+    if f.visibility == FileVisibility.DEPARTMENT:
+        if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
+            raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
     return {"id": f.id, "filename": f.filename, "visibility": f.visibility.value, "metadata": f.metadata_, "downloads_count": f.downloads_count}
 
 @router.get("/{file_id}/download")
@@ -87,20 +91,24 @@ async def download_file(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
-    q = await session.execute(select(File).where(File.id == file_id))
+    q = await session.execute(
+    select(File).options(selectinload(File.owner)).where(File.id == file_id)
+    )
     f = q.scalar_one_or_none()
     if not f:
         raise HTTPException(status_code=404, detail=ERR_NOT_FOUND)
     role = _role_from_user(current_user)
     if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
         raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
-
+    if f.visibility == FileVisibility.DEPARTMENT:
+        if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
+            raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
     client = get_client()
     obj = client.get_object(settings.MINIO_BUCKET_NAME, f.object_key)
 
     def _iter():
         try:
-            for chunk in obj.stream(64 * 1024):
+            for chunk in obj.stream(STREAM_CHUNK_SIZE):
                 yield chunk
         finally:
             obj.close()
@@ -108,7 +116,6 @@ async def download_file(
 
     f.downloads_count += DOWNLOADS_INCREMENT
     await session.commit()
-
     return StreamingResponse(
         _iter(),
         media_type="application/octet-stream",
@@ -145,17 +152,29 @@ async def list_files(
     current_user=Depends(get_current_user),
 ):
     role = _role_from_user(current_user)
-    q = select(File)
+    base = select(File).join(User, File.owner_id == User.id).options(selectinload(File.owner))
+
+    if role == Role.ADMIN:
+        q = base
+    elif role == Role.MANAGER:
+        q = base.where(
+            or_(
+                File.visibility == FileVisibility.PUBLIC,
+                File.visibility == FileVisibility.DEPARTMENT,
+                and_(File.visibility == FileVisibility.PRIVATE, File.owner_id == current_user.id),
+            )
+        )
+    else:
+        q = base.where(
+            or_(
+                File.visibility == FileVisibility.PUBLIC,
+                and_(File.visibility == FileVisibility.DEPARTMENT, User.department_id == current_user.department_id),
+                and_(File.visibility == FileVisibility.PRIVATE, File.owner_id == current_user.id),
+            )
+        )
+
+    if department_id is not None and role in {Role.MANAGER, Role.ADMIN}:
+        q = q.where(User.department_id == department_id)
+
     rows = (await session.execute(q)).scalars().all()
-    out = []
-    for f in rows:
-        if f.visibility == FileVisibility.PUBLIC:
-            out.append(f)
-            continue
-        if f.visibility == FileVisibility.DEPARTMENT and role in {Role.MANAGER, Role.ADMIN}:
-            out.append(f)
-            continue
-        if f.visibility == FileVisibility.PRIVATE and f.owner_id == current_user.id:
-            out.append(f)
-            continue
-    return [{"id": x.id, "filename": x.filename, "visibility": x.visibility.value} for x in out]
+    return [{"id": x.id, "filename": x.filename, "visibility": x.visibility.value} for x in rows]
