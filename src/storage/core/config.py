@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     MINIO_ROOT_USER: str
     MINIO_ROOT_PASSWORD: str
     MINIO_BUCKET_NAME: str
+    ADMIN_EMAIL: str
+    ADMIN_PASSWORD: str
+    ADMIN_DEPARTMENT_ID: int
 
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
 
