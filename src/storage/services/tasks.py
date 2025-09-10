@@ -9,10 +9,24 @@ from storage.services.metadata import extract_pdf_meta, extract_docx_meta
 from storage.services.s3 import get_client
 from minio.error import S3Error
 
-celery_app = Celery(__name__, broker=settings.CELERY_BROKER_URL, backend=settings.CELERY_RESULT_BACKEND)
+celery_app = Celery(
+    __name__,
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND,
+)
+
 
 @celery_app.task(name=CELERY_TASK_EXTRACT_METADATA)
 def extract_metadata_task(object_key: str, content_type: str):
+    """
+    Фоновая задача для извлечения метаданных из файлов.
+
+    Загружает файл из MinIO по object_key, определяет тип по content_type
+    (PDF или DOC/DOCX), извлекает основные метаданные и сохраняет их в БД.
+
+    :param object_key: Ключ объекта в хранилище MinIO
+    :param content_type: MIME-тип файла
+    """
     client = get_client()
     try:
         response = client.get_object(settings.MINIO_BUCKET_NAME, object_key)
@@ -21,11 +35,13 @@ def extract_metadata_task(object_key: str, content_type: str):
         response.release_conn()
     except S3Error:
         return
+
     meta = {}
     if content_type == MIME_PDF:
         meta = extract_pdf_meta(data)
     elif content_type in DOC_TYPES:
         meta = extract_docx_meta(data)
+
     async def _save():
         async with async_session_maker() as session:
             q = await session.execute(select(File).where(File.object_key == object_key))
@@ -34,5 +50,6 @@ def extract_metadata_task(object_key: str, content_type: str):
                 return
             file.metadata_ = meta
             await session.commit()
+
     import asyncio
     asyncio.run(_save())

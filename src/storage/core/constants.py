@@ -23,7 +23,7 @@ ERR_NOT_FOUND = "Not found"
 ERR_FILE_TOO_LARGE = "File too large for role"
 ERR_TYPE_NOT_ALLOWED = "File type not allowed for role"
 ERR_VISIBILITY_NOT_ALLOWED = "Visibility not allowed for role"
-
+EMAIL_ALREADY_EXISTS = "Email already exists"
 MIME_PDF = "application/pdf"
 MIME_DOC = "application/msword"
 MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -50,3 +50,12 @@ ROLE_ALLOWED_VISIBILITY = {
 CELERY_TASK_EXTRACT_METADATA = "extract_metadata_task"
 
 STREAM_CHUNK_SIZE = 64 * 1024
+
+# File model
+FILENAME_MAX_LENGTH = 512
+OBJECT_KEY_MAX_LENGTH = 1024
+DEFAULT_DOWNLOADS_COUNT = 0
+
+# User model
+EMAIL_MAX_LENGTH = 255
+PASSWORD_HASH_MAX_LENGTH = 255

@@ -18,11 +18,14 @@ from storage.core.config import settings
 
 router = APIRouter()
 
+
 def _role_from_user(user: User) -> Role:
     return Role(user.role.value)
 
+
 def _visibility_enum(v: Visibility) -> FileVisibility:
     return FileVisibility(v.value)
+
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_file(
@@ -31,15 +34,21 @@ async def upload_file(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
+    """
+    Загрузка файла в хранилище с учётом роли и уровня видимости.
+
+    Принимает multipart/form-data: файл и значение видимости.
+    Проверяет ограничения роли по типу и размеру, сохраняет в S3, создаёт запись в БД и запускает задачу извлечения метаданных.
+    """
     role = _role_from_user(current_user)
     if visibility not in ROLE_ALLOWED_VISIBILITY[role]:
-        raise HTTPException(status_code=403, detail=ERR_VISIBILITY_NOT_ALLOWED)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_VISIBILITY_NOT_ALLOWED)
     if file.content_type not in ROLE_ALLOWED_TYPES[role]:
-        raise HTTPException(status_code=415, detail=ERR_TYPE_NOT_ALLOWED)
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=ERR_TYPE_NOT_ALLOWED)
     max_bytes = ROLE_MAX_SIZE_MB[role] * BYTES_IN_MB
     chunk = await file.read()
     if len(chunk) > max_bytes:
-        raise HTTPException(status_code=413, detail=ERR_FILE_TOO_LARGE)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=ERR_FILE_TOO_LARGE)
     object_key = f"{current_user.id}/{secrets.token_urlsafe(OBJECT_KEY_RANDOM_BYTES)}_{file.filename}"
     ensure_bucket()
     client = get_client()
@@ -65,25 +74,33 @@ async def upload_file(
     extract_metadata_task.delay(object_key, file.content_type)
     return {"id": db_file.id, "filename": db_file.filename, "visibility": db_file.visibility.value, "object_key": db_file.object_key}
 
+
 @router.get("/{file_id}")
 async def get_file_info(
     file_id: int,
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
+    """
+    Получение информации о файле по ID.
+
+    Возвращает базовые сведения и извлечённые метаданные.
+    Применяются проверки доступа по видимости и ролям.
+    """
     q = await session.execute(
-    select(File).options(selectinload(File.owner)).where(File.id == file_id)
+        select(File).options(selectinload(File.owner)).where(File.id == file_id)
     )
     f = q.scalar_one_or_none()
     if not f:
-        raise HTTPException(status_code=404, detail=ERR_NOT_FOUND)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND)
     role = _role_from_user(current_user)
     if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
-        raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     if f.visibility == FileVisibility.DEPARTMENT:
         if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
-            raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     return {"id": f.id, "filename": f.filename, "visibility": f.visibility.value, "metadata": f.metadata_, "downloads_count": f.downloads_count}
+
 
 @router.get("/{file_id}/download")
 async def download_file(
@@ -91,18 +108,23 @@ async def download_file(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
+    """
+    Скачивание файла по ID со стримингом и проверкой прав доступа.
+
+    Увеличивает счётчик скачиваний и возвращает поток ответа с корректными заголовками для загрузки.
+    """
     q = await session.execute(
-    select(File).options(selectinload(File.owner)).where(File.id == file_id)
+        select(File).options(selectinload(File.owner)).where(File.id == file_id)
     )
     f = q.scalar_one_or_none()
     if not f:
-        raise HTTPException(status_code=404, detail=ERR_NOT_FOUND)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERR_NOT_FOUND)
     role = _role_from_user(current_user)
     if f.visibility == FileVisibility.PRIVATE and f.owner_id != current_user.id and role != Role.ADMIN:
-        raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     if f.visibility == FileVisibility.DEPARTMENT:
         if role == Role.USER and (not f.owner or f.owner.department_id != current_user.department_id):
-            raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     client = get_client()
     obj = client.get_object(settings.MINIO_BUCKET_NAME, f.object_key)
 
@@ -130,20 +152,28 @@ async def delete_file(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
+    """
+    Удаление файла по ID с учётом прав доступа.
+
+    Пользователь может удалять только свои файлы.
+    Менеджер может удалять файлы своего отдела.
+    Администратор может удалять любые файлы.
+    """
     q = await session.execute(select(File).where(File.id == file_id))
     f = q.scalar_one_or_none()
     if not f:
         return
     role = _role_from_user(current_user)
     if role == Role.USER and f.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     if role == Role.MANAGER and getattr(f, "owner", None) and getattr(f.owner, "department_id", None) != current_user.department_id:
-        raise HTTPException(status_code=403, detail=ERR_FORBIDDEN)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ERR_FORBIDDEN)
     client = get_client()
     client.remove_object(settings.MINIO_BUCKET_NAME, f.object_key)
     await session.delete(f)
     await session.commit()
     return
+
 
 @router.get("/")
 async def list_files(
@@ -151,6 +181,12 @@ async def list_files(
     session: AsyncSession = Depends(get_session),
     current_user=Depends(get_current_user),
 ):
+    """
+    Список доступных пользователю файлов.
+
+    Учитывает роль и уровень видимости.
+    Для MANAGER/ADMIN поддерживается фильтрация по department_id.
+    """
     role = _role_from_user(current_user)
     base = select(File).join(User, File.owner_id == User.id).options(selectinload(File.owner))
 

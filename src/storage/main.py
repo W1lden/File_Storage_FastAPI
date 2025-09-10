@@ -4,9 +4,8 @@ from storage.core.config import settings
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="File Storage API with metadata and roles",
-    version="1.0.0"
+    description=settings.DESCRIPTION,
+    version=settings.VERSION,
 )
-
 
 app.include_router(api_router)
